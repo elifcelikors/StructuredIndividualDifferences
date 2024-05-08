@@ -1,0 +1,853 @@
+---
+title: "MS"
+author: "Elif Celikors"
+date: "2023-11-28"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r packages, include = FALSE}
+library(tidyverse)
+library(ggplot2)
+library(corrplot)
+library(stats)
+library(caTools) # train/test split
+library(caret) # createDataPartition
+library(rdist) # distance matrix
+library(splines) # curve fitting
+library(ISLR) # curve fitting
+library(grid) # combine different graphs
+library(reporter)
+library(PupillometryR) # ggplot geom_flat_violin
+library(rstatix) # cohen's d for t-test
+```
+ 
+In the following lines of codes, we import the necessary data files. There are two of them:
+- 'self' contains ratings of artworks. The originally imported data (in SID_cleaning.Rms; [SID = shared individual differences]) contains data on people's prediction of lay people's and art experts' ratings of the images (We don't use this data in this script).
+
+- We also import the data frame containing visual feature data for each image (llvps = low level visual properties). See Celikors & Wells (2022) for more details on how llvps are calculated.
+```{r data_import, include = FALSE}
+self <-  data.frame(read.csv("data/SID_selfRatings.csv"), stringsAsFactors = F)[,2:275]
+llvps <- data.frame(read.csv("data/SID_visualFeatures.csv"), stringsAsFactors = F)
+```
+
+Following are the variables that will be used throughout this script.
+- SS is the sample size. This doesn't reflect our original sample size. It's the number of participant we perform the analysis on, after cleaning the data. 
+
+- SPLIT.RATIOS is the ratio of number of images in the training and test sets. 
+
+- N.LAST is the maximum number of people that can be in someone's cohort, which is the sample size minus 1 (because the cohorts don't include the target individual)
+
+- REPEAT is the number of iterations of the SPLIT.RATIOS cross-validation scheme
+
+- K is the optimal taste cohort size. We actually derive K below, in the "taste_cohort_analysis" script. But since this value is used as a variable in the visual feature analyses after the "taste_cohort_analysis" script, we are adding it here as a variable.
+
+```{r initiate_variables, include = FALSE}
+SS <- ncol(self) # sample size after data cleaning
+SPLIT.RATIOS <- 0.8 # train:test ratio
+N.LAST <- SS - 1 # maximum cohort size
+REPEAT <- 100 # number of cross-validation
+K <- 35 # optimal taste cohort size
+```
+
+(2) METHOD
+
+The following chunk simply counts the number of individuals in each group of each demographic factor. In the paper, these are summarized in the 'Participants' section of 'Method'.
+```{r demographics_descriptive}
+self_demog %>% count(gender) 
+self_demog %>% count(race) 
+table(self_demog$gender, self_demog$race)
+self_demog %>% count(education)
+mean(self_demog$age)
+sd(self_demog$age)
+```
+
+(3) RESULTS 
+
+The following script contains three loops that yield RMSE and R2 for models predicting each individual's image ratings using taste cohorts of different sizes. Here's a  crude outline of the code:
+- The outermost loop is the REPEAT iteration of the cross-validation. Later analyses are performed by averaging the REPEAT.
+- The middle loop goes through different number of taste cohorts, ranging from 1 to 273 (N.LAST). Taste cohort of size n is the n nearest neighbor of the target individual.
+- The innermost loop goes through each subject (i.e., target individual) and calculates the RMSE and R2 for the models using their taste cohort and a random cohort. 
+
+The two important data frame outputs of this script are the following:
+- rmse.neigh - RMSE of models using taste cohort
+- rmse.other - RMSE of models using random cohort
+
+NOTE: This chunk of code is computationally demanding; therefore can take a very long time to run depending on the computer that it's being ran on. We do share the output of this code, if you prefer not to run this one. 
+```{r taste_cohort}
+set.seed(1234)
+REPEAT=100
+# empty 3D arrays to hold the RMSE values. 
+rmse.neigh <- array(dim = c(SS, N.LAST-1, REPEAT)) 
+rmse.other <- array(dim = c(SS, N.LAST-1, REPEAT)) 
+
+self <- data.frame(self)
+subject.IDs <- colnames(self) %>%  data.frame()
+
+for (r in 1:REPEAT) { # iterate REPEATS time
+  # randomly split dfs to train and test sets
+  trainIndex <- createDataPartition(1:50, p = SPLIT.RATIOS, list = FALSE) # creates ~40 random integers btwn 1-5, w/o replace.
+  
+  data.train.IDs <- self[trainIndex, ] 
+  data.test.IDs <- self[-trainIndex, ]
+  llvp.train <- llvps[trainIndex,]
+  llvp.test <- llvps[-trainIndex,]
+  
+  # Calculate distance matrix
+  distance.matrix <- pdist(t(data.train.IDs)) # pdist computes the dist among the rows, that's why transpose it
+  colnames(distance.matrix) <- rownames(distance.matrix) <- colnames(self)
+  
+  for (k in 2:(N.LAST)) { #loop through different number of neighbors
+    for (i in 1:SS) { #loop through each subject
+      ### MAIN SUBJECT  ###
+      #extract the train and test data of the subject whose ratings we will predict:
+      main.subject.train <- data.frame(DV = data.train.IDs[,i])
+      main.subject.test <- data.frame(DV = data.test.IDs[,i])
+      
+      ### TRAIN ###
+      a = distance.matrix[,i] %>%  data.frame()
+      non.main.subjects = a[order(a$.), ,drop=F] %>% data.frame()
+      non.main.subjects.IDs <- rownames(non.main.subjects)[(2):nrow(non.main.subjects)]
+
+      # Identify the subject ID for k nearest and k random neighbors:
+      neighbor.IDs.X <- non.main.subjects.IDs[1:k] %>% as.vector()
+      neighbor.IDs <- substr(neighbor.IDs.X, 2, nchar(neighbor.IDs.X))
+      
+      other.IDs.X <- non.main.subjects.IDs %>% data.frame() %>% sample_n(size = k) %>% unlist()
+      other.IDs <- substr(other.IDs.X, 2, nchar(other.IDs.X))
+
+      # extract the train data for the taste and random cohort:
+      neighbor.train <- data.train.IDs[, as.numeric(neighbor.IDs)]
+      other.train <- data.train.IDs[, as.numeric(other.IDs)]
+
+      # means of taste and random cohorts that will be used to train the model:
+      neigh.train.mean <- rowMeans(neighbor.train)
+      other.train.mean <- rowMeans(other.train)
+
+      # train the taste and random cohorts:
+      model.neigh.mean <- lm(formula = DV ~ ., data = cbind(main.subject.train, IV = neigh.train.mean))
+      model.other.mean <- lm(formula = DV ~ ., data = cbind(main.subject.train, IV = other.train.mean))
+
+      ### TEST ###
+      # extract the test data  for the taste and random cohort:
+      neighbor.test <- data.test.IDs[, as.numeric(neighbor.IDs)]
+      other.test <-  data.test.IDs[, as.numeric(other.IDs)]
+
+      # model predicted values based on the test data:
+      preds.neigh.mean <- predict(model.neigh.mean, cbind(main.subject.test, IV = rowMeans(neighbor.test)))
+      preds.other.mean <- predict(model.other.mean, cbind(main.subject.test, IV = rowMeans(other.test)))
+
+      # calculate RMSE values and save them:
+      rmse.neigh[i, k-1, r] <- sqrt(mean((main.subject.test$DV - preds.neigh.mean)^2))
+      rmse.other[i, k-1, r] <- sqrt(mean((main.subject.test$DV - preds.other.mean)^2))
+      }
+  }
+}
+
+## Take the means of the iterations
+rmse.neigh.mean.sum <- matrix(0, nrow=SS, ncol=N.LAST-1) 
+rmse.other.mean.sum <- matrix(0, nrow=SS, ncol=N.LAST-1) 
+for (m in 1:REPEAT) { 
+  a <- rmse.neigh[,,m]
+  rmse.neigh.mean.sum <- rmse.neigh.mean.sum[,] + as.matrix(rmse.neigh[,,m])
+  rmse.other.mean.sum <- rmse.other.mean.sum[,] + as.matrix(rmse.other[,,m])
+}
+rmse.neigh.mean <- rmse.neigh.mean.sum / REPEAT
+rmse.other.mean <- rmse.other.mean.sum / REPEAT
+
+#rmse.neigh.cleaned <- rmse.neigh.mean %>% data.frame() %>% select(2:ncol(rmse.neigh.mean))
+#rmse.other.cleaned <- rmse.other.mean %>% data.frame() %>% select(2:ncol(rmse.neigh.mean))
+
+write.csv(rmse.neigh.mean, "data/rmse.neigh.mean.csv")
+write.csv(rmse.other.mean, "data/rmse.other.mean.csv")
+```
+
+If you prefer not to run the code chunk above, here, we import the output of the previous code. Basically, we are just reimporting the outcome of taste_cohort, so we don't have to run that chunk every time we want to perform some analyses. 
+```{r taste_cohort_clean_IF_import}
+rmse.neigh.mean <- read.csv("data/rmse.neigh.mean.csv")  %>% data.frame() %>% select(2:ncol(rmse.neigh.mean))
+rmse.other.mean <- read.csv("data/rmse.other.mean.csv") %>% data.frame() %>% select(2:ncol(rmse.other.mean))
+```
+
+(3.1) Taking advantage of SID
+```{r neigh_vs_random_models}
+### rmse averaged across subjects, such that each k is one data point:
+rmse.neigh.rowMean <- data.frame(colMeans(rmse.neigh.mean, na.rm=T)) %>% rename(neigh=1)
+rmse.other.rowMean <- data.frame(colMeans(rmse.other.mean, na.rm=T)) %>% rename(other=1)
+
+rmse.mMeans <- bind_cols(rmse.neigh.rowMean %>% data.frame(), 
+                         rmse.other.rowMean %>% data.frame()) %>% 
+  rename(neigh = 1, nonNeigh = 2) %>% 
+  mutate(m_size = 1:(N.LAST-1)) %>% 
+  pivot_longer(cols = neigh:nonNeigh, names_to = "neigh", values_to = "rmse") 
+
+t.test(rmse.mMeans$rmse ~ rmse.mMeans$neigh, paired=TRUE)
+
+d <- rmse.mMeans %>% cohens_d(rmse ~ neigh, paired=TRUE)
+
+### Curve fitting: plotting how neighbor vs non-neigh distances change as a function of number of neighbors
+neigh_rmse <- rmse.mMeans %>% filter(neigh == "neigh")
+nonNeigh_rmse <- rmse.mMeans %>% filter(neigh == "nonNeigh")
+
+fit_neigh <- lm(rmse ~ bs(m_size, knots = c(35)), data = neigh_rmse[1:(N.LAST-1),])
+neigh_rmse$predictions <- predict(fit_neigh, data.frame(m_size=1:(N.LAST-1)))
+
+fit_nonNeigh <- lm(rmse ~ bs(m_size, knots = c(10)), data = nonNeigh_rmse[1:(N.LAST-1),])
+nonNeigh_rmse$predictions <- predict(fit_nonNeigh, data.frame(m_size=1:(N.LAST-1)))
+
+combined_rmse <- rbind(neigh_rmse, nonNeigh_rmse)
+
+RMSE_mean <- nonNeigh_rmse %>% filter(m_size==(N.LAST-1)) %>% select(rmse) %>% as.numeric()
+
+ggplot(combined_rmse, aes(m_size, rmse, color=neigh)) + geom_point(show.legend = F, size=0.5) +
+  xlim(0, N.LAST-1) + 
+  #geom_line(aes(y=RMSE_mean), size=0.6,alpha=1, color="black", linetype="dashed") +
+  geom_line(data = (combined_rmse %>% filter(neigh=="neigh")), aes(m_size, predictions), size=0.4,alpha=0.8, color="black") +
+  scale_fill_discrete(name="x",labels = c("random cohort", "taste ohort")) +
+  xlab("Cohort size") + ylab("RMSE") +
+  scale_x_continuous(breaks = seq(0, 274, by = 20)) + 
+  theme(axis.title = element_text(size = 20), axis.text.x=element_text(size=10)) +
+  annotate("text", x=c(250,250), y=c(1.60,1.52), label=c("Random cohort", "Taste cohort"),
+           color=c("#00BFC4","#FB766D"), fontface="bold", size=5)
+```
+
+(3.2) Optimum taste cohort size
+```{r optimum_taste_cohort}
+### optimum cohort size of mean of all iterations - it's 31
+opt_cohort_rmse_model <- neigh_rmse[which.min(neigh_rmse$rmse),1]
+opt_cohort_rmse_min5 <- neigh_rmse %>% 
+  arrange(rmse) %>% slice(1:5) %>% summarise(average = mean(m_size))
+
+### optimum cohort size at each iteration
+opt_cohort <- data.frame()
+for (r in 1:REPEAT) { 
+  cleaned <- rmse.neigh[,,r]
+  subj_means <- data.frame(colMeans(cleaned, na.rm=T)) %>% 
+    rename(rmse=1) %>% 
+    mutate(m_size = 1:(N.LAST-1)) 
+  
+  opt_cohort[r,1] <- subj_means %>% 
+    arrange(rmse) %>% 
+    slice(1:5) %>% 
+    summarise(average = mean(m_size)) 
+}
+
+write.csv(opt_cohort, "data/opt_cohort_size.csv")
+
+# some statistics & histogram of the optimum cohort sizes at different iterations:
+range(opt_cohort$average)
+quantile(opt_cohort$average)
+mean(opt_cohort$average)
+sd(opt_cohort$average)
+median(opt_cohort$average)
+ggplot(opt_cohort, aes(x=average)) + geom_histogram(color="black", fill="white", binwidth=1) + xlab("optimum taste cohort")
+```
+
+(3.3) Comparing taste cohort models with sample mean models
+```{r taste_cohort_sample_mean}
+# extract the RMSE when the cohort size is optimized; i.e., 31
+rmse.31 <- rmse.neigh.mean %>% data.frame() %>% select(X31) 
+rmse.31.mean <- colMeans(rmse.31)
+
+# calculate RMSE when the mean image ratings are used as estimates
+rmse.sample <- sqrt(colMeans((self - colMeans(self))^2)) %>% data.frame()
+rmse.sample.mean <- colMeans(rmse.sample) 
+
+perc_improvement <- (rmse.sample.mean - rmse.31.mean) * (100/8)
+perc_improvement_range <- (rmse.sample - rmse.31) * (100/8)
+quantile(perc_improvement_range %>% unlist())
+
+# paired sample comparison of the RMSEs of two models:
+t.test(rmse.sample$.,rmse.31$X31, paired=T)
+
+# calculating the effect size:
+d <- cbind(rmse.sample$.,rmse.31$X31) %>% data.frame() %>% 
+  rename("rmse.sample"=1, "rmse.31"=2) %>% 
+  pivot_longer(cols="rmse.sample":"rmse.31",names_to = "model",values_to = "rmse") %>% 
+  cohens_d(rmse ~ model, paired=TRUE)
+```
+
+(3.4) Taste cohort as a function of sample size
+```{r taste_cohort_sampleSize}
+set.seed(234)
+
+# set up some model parameters / initiate variables
+N.LAST <- SS - 3
+ss_set <- seq(from=10, to=SS, by=1) # sample size
+
+min.point.mean <- array(dim = c(SS, N.LAST-1)) 
+#min_point <- data.frame(cohort_size_fit = numeric(length(ss_set)),prediction_fit = numeric(length(ss_set)),
+                      #  cohort_size_median = numeric(length(ss_set)),r_mean =numeric(length(ss_set)))
+cohort_size <- array(dim = c(length(ss_set), REPEAT))
+
+start_time <- Sys.time()
+self <- self %>% data.frame() # this is needed because we want to preserve the column names of the self df
+REPEAT = 10 # Not 100 because even 10 takes a very long time.. 
+for (r in 1:REPEAT) { # iterate REPEATS time
+  trainIndex  <- createDataPartition(1:50, p = SPLIT.RATIOS, list = FALSE)
+  rmse.neigh <- array(dim = c(SS, N.LAST)) # empty matrices to hold RMSE values
+  for (s in 1:length(ss_set)) { # loop through different sample sizes
+    N.SAMPLE = ss_set[s]
+    sampled_self <- self[ ,sample(SS, size=N.SAMPLE)]
+    subject_IDs <- colnames(sampled_self) %>% data.frame() 
+    # randomly split images to train and test sets
+    data.train.IDs <- sampled_self[trainIndex, ]; data.test.IDs <- sampled_self[-trainIndex, ]
+    N.LAST <- N.SAMPLE - 2
+    # Calculate distance matrix
+    distance.matrix <- pdist(t(data.train.IDs)) 
+    colnames(distance.matrix) <- rownames(distance.matrix) <- colnames(sampled_self)
+    for (k in 2:N.LAST) { #loop through different number of neighbors 
+      for (i in 1:N.SAMPLE) { #loop through each subject
+        ### MAIN SUBJECT  ###
+        main.subject.train <- data.frame(data.train.IDs[,i])
+        rownames(main.subject.train) = rownames(data.train.IDs); colnames(main.subject.train) = c("DV")
+        main.subject.test <- data.frame(data.test.IDs[,i])
+        rownames(main.subject.test) = rownames(data.test.IDs); colnames(main.subject.test) = c("DV")
+        ### TRAIN ###
+        a = distance.matrix[,i] %>%  data.frame() 
+        non.main.subjects = a[order(a$.), ,drop=F] 
+        neighbor.IDs <- rownames(non.main.subjects)[(2):(k+1)] # ID k nearest neighbors
+        neighbor.train <- data.train.IDs[, neighbor.IDs]
+        neigh.train.mean <- rowMeans(neighbor.train) 
+        model.neigh.mean <- lm(formula = DV ~ ., data = cbind(main.subject.train, IV = neigh.train.mean))
+        ### TEST ###
+        neighbor.test <- data.test.IDs[, neighbor.IDs]
+        preds.neigh.mean <- predict(model.neigh.mean, cbind(main.subject.test, IV = rowMeans(neighbor.test)))
+        # calculate residual and total sum of squares to calculate R^2 and save the values:
+        rmse.neigh[i, k-1] <- sqrt(mean((main.subject.test$DV - preds.neigh.mean)^2))
+      }
+    }
+    r.clean <- rmse.neigh[,] %>% data.frame() %>% filter(X1!="-Inf")
+    r.sMeans <- colMeans(r.clean[,1:(N.SAMPLE-3)], na.rm=T) %>%
+      data.frame() %>% rename(rmse_r2 = 1) %>% 
+      mutate(m_size = 1:(N.SAMPLE - 3)) 
+    fit <- lm(rmse_r2 ~ bs(m_size, knots = c(4)), data = r.sMeans[1:N.SAMPLE,])
+    r.sMeans$predictions <- predict(fit, data.frame(m_size=r.sMeans$m_size))
+   # min_point[s,] <- c(cohort_size_fit = r.sMeans[which.min(r.sMeans$predictions),c("m_size")] %>% as.numeric(),
+    #                   prediction_fit = r.sMeans[which.min(r.sMeans$predictions),c("predictions")] %>% as.numeric(),
+     #                  cohort_size_median = r.sMeans[order(r.sMeans$rmse_r2)[1:5],"m_size"] %>% unlist() %>% median(),
+      #                 r_mean = r.sMeans[order(r.sMeans$rmse_r2)[1:5],"rmse_r2"] %>% unlist() %>% median())
+  cohort_size[s,r] = r.sMeans[order(r.sMeans$rmse_r2)[1:5],"m_size"] %>% unlist() %>% median()
+  }
+}
+
+# take the means of the iterations
+min.point.mean <- (( cohort_size[,1] %>% as.matrix) + (cohort_size[,10] %>% as.matrix) +
+                        (cohort_size[,2] %>% as.matrix) + (cohort_size[,3] %>% as.matrix) + 
+                        (cohort_size[,4] %>% as.matrix) + (cohort_size[,5] %>% as.matrix) +
+                        (cohort_size[,6] %>% as.matrix) + (cohort_size[,7] %>% as.matrix) + 
+                        (cohort_size[,8] %>% as.matrix) + (cohort_size[,9] %>% as.matrix)) / 10
+  
+end_time <- Sys.time(); execution_time <- end_time - start_time; print(paste("Execution time:", execution_time))  
+#write.csv(min.point.mean, "/Users/field-admin/Library/CloudStorage/OneDrive-CornellUniversity/Desktop/min_point_mean.csv")
+
+```
+
+```{r taste_cohort_sampleSize_plots}
+min.point.mean <- read.csv("data/min_point_mean.csv")[,2] %>% data.frame() %>% rename("ocs"=1)
+min.point.mean$ss <- seq(from=10, to=nrow(min.point.mean)+9, by=1)
+min.point.mean$ss_log <- log(min.point.mean$ss)
+fit_ss <- lm(ocs ~ ss_log,  data = min.point.mean)
+min.point.mean$predictions <- fit_ss[["fitted.values"]]
+
+ggplot(min.point.mean, aes(ss, ocs)) + 
+  geom_point(show.legend = T, alpha=0.5) + 
+  geom_line(aes(ss, predictions), size=1, color="blue") + 
+  xlab("sample size") + ylab("optimal taste cohort size") + 
+  theme(axis.title = element_text(size = 20), axis.text.x=element_text(size=20)) 
+```
+
+(3.5) Visual feature models
+```{r llvp_cohort_models}
+# empty matrices to hold RMSE values
+rmse.llvp.cohort <- data.frame()
+r2.llvp.cohort  <- data.frame()
+
+for (r in 1:100) {
+  #randomly split images to train and test sets
+  #SPLIT.RATIOS = 0.5
+  trainIndex <- createDataPartition(1:50, p = SPLIT.RATIOS, list = FALSE) 
+  
+  data.train.IDs <- self[trainIndex, ]
+  llvp.train <- llvps[trainIndex,]
+  
+  data.test.IDs <- self[-trainIndex, ]
+  llvp.test <- llvps[-trainIndex,]
+  
+  # Calculate distance matrix
+  distance.matrix <- pdist(t(data.train.IDs)) %>% data.frame() 
+  colnames(distance.matrix) <- rownames(distance.matrix) <- colnames(self)
+
+    for (i in 1:SS) { #loop through each subject
+      ### MAIN SUBJECT  ###
+      main.subject.test <- data.frame(data.test.IDs[,i])
+      rownames(main.subject.test) = rownames(data.test.IDs) # not sure if this is needed
+      colnames(main.subject.test) = c("DV")
+      
+      ### TRAIN ###
+      a = distance.matrix[,i] %>%  data.frame() 
+      non.main.subjects = a[order(a$.), ,drop=F] %>% data.frame()
+      neighbor.IDs <- rownames(non.main.subjects)[(2):(k+1)] 
+      #neighbor.IDs <- substr(neighbor.IDs.X, 2, nchar(neighbor.IDs.X))
+      neighbor.train <- data.train.IDs[, as.numeric(neighbor.IDs)]
+      
+      neigh.train.mean <- cbind(rowMeans(neighbor.train, na.rm=T), llvp.train) %>% rename(neigh_mean = 1)
+      model.neigh <- lm(neigh_mean ~ hue+sat+bright+sdHue+sdSat+sdBright+ED+entropy, data=neigh.train.mean)
+
+      ### TEST ###
+      test <- cbind(main.subject.test, llvp.test)
+      preds.neigh <- predict(model.neigh, llvp.test[,2:ncol(llvp.test)])
+
+      RSS.neigh = sum((main.subject.test$DV - preds.neigh)^2)
+      TSS = sum((main.subject.test$DV - mean(main.subject.test$DV))^2)
+      
+      R2.neigh = 1 - (RSS.neigh/TSS)
+      r2.llvp.cohort[i, r] <- R2.neigh
+      rmse.llvp.cohort[i, r] <- sqrt(mean((main.subject.test$DV - preds.neigh)^2))
+    }
+}
+
+# RMSE
+rmse.llvp.cohort[rmse.llvp.cohort == "-Inf" ] <- 0
+llvp.cohort.rmseM <- rowMeans(rmse.llvp.cohort) %>% data.frame()%>%colMeans()%>%print()
+llvp.cohort.rmseSD <- rowMeans(rmse.llvp.cohort) %>% sd() %>% print()
+llvp.cohort.rmse.itM <- rowMeans(rmse.llvp.cohort,na.rm=T) %>% data.frame() 
+
+# R2
+r2.llvp.cohort[r2.llvp.cohort == "-Inf" ] <- 0
+llvp.cohort.r2M <- rowMeans(r2.llvp.cohort,na.rm=T) %>% data.frame() %>% colMeans() %>% print()
+llvp.cohort.r2SD <- rowMeans(r2.llvp.cohort,na.rm=T) %>% sd() %>% print()
+llvp.cohort.r2.itM <- rowMeans(r2.llvp.cohort,na.rm=T) %>% data.frame() 
+```
+
+```{r model_comparisons}
+
+all.RMSE <- cbind(rmse.sample, rmse.31, llvp.cohort.rmse.itM) %>% 
+  rename("Sample mean\n as estimate"=1, 
+         "Taste cohort\n models"=2, 
+         "Visual features\n model"=3) %>% 
+  pivot_longer(cols="Sample mean\n as estimate":"Visual features\n model",names_to = "model",values_to = "rmse")
+
+# pair-wise comparigon (Bonferroni correction?)
+combined_models <- cbind(rmse.sample, rmse.31, llvp.cohort.rmse.itM) %>%
+  rename(sample_mean = 1, taste_cohort=2, visual_features = 3) 
+
+t.test(combined_models$taste_cohort, combined_models$visual_features, paired = TRUE)
+t.test(combined_models$taste_cohort, combined_models$sample_mean, paired = TRUE)
+t.test(combined_models$visual_features, combined_models$sample_mean, paired = TRUE)
+
+d <- all.RMSE %>% 
+  filter(model == c("Taste cohort\n models", "Visual features\n model")) %>% 
+  cohens_d(rmse ~ model, paired=TRUE)
+
+# visualization
+ggplot(all.RMSE, aes(x=model, y=rmse)) + 
+  geom_boxplot() + 
+  geom_point(position = position_jitter(w = .15),alpha=0.4) +
+  geom_flat_violin(position = position_nudge(x = .2), alpha = 0.7)  +
+  stat_summary(fun=mean, color="red",geom="crossbar", show.legend=FALSE,size=0.2) +
+  ylab("RMSE") + xlab("") + ylim(0.5,5.5) +
+  theme(axis.text.x=element_text(size=13), 
+        axis.text.y=element_text(size=12), 
+        axis.title=element_text(size=15)) 
+```
+
+(3.5) RESULTS: DEMOGRAPHICS
+The output of the following chunk of code is "all_demog":
+- where each row is a subject
+- Columns contain:
+  (1) each subjects' own demographic data
+  (2) demog. data of the subject's K nearest neighbors
+  (3) demog. data of K random neighbor
+- Demographic variables included in the cohort analyses are the continuous ones (personality traits, art background, age)
+
+```{r demographics_cohort_analyses, include = FALSE}
+set.seed(123)
+neigh.IDs <- matrix(nrow = SS, ncol=K) # empty matrices to hold RMSE values
+other.IDs <- matrix(nrow = SS, ncol=K)
+subject.IDs <- data.frame(c(1:SS)) %>% rename(subject.ID=1) # df of subject.IDs that will be used to add to some dfs below
+rownames(subject.IDs) = colnames(self)
+
+# randomly split images to train and test sets
+trainIndex <- createDataPartition(c(1:50), p = SPLIT.RATIOS, list = FALSE)
+data.train.IDs <- data.frame(rbind(t(subject.IDs), self[trainIndex, ]))
+data.test.IDs <- data.frame(rbind(t(subject.IDs), self[-trainIndex, ]))
+
+# distance matrix for the training data
+distance.matrix <- pdist(t(data.train.IDs[-1, ]))# pdist computes the dist among the rows, that's why transposing data.train.IDs is necessary
+colnames(distance.matrix) <- rownames(distance.matrix) <- t(subject.IDs) # assign subjectIDs as row and column names
+
+for (i in 1:SS) { #loop through each subject (i.e., target subject) to identify their K neares neigh's subject ID
+  non.main.subjects <- data.frame(sort(distance.matrix[i, ])[-1]) # everyone except for the target
+  neigh.IDs[i, ] <- c(as.numeric(rownames(non.main.subjects)[1:K])) # ID of the K nearest neighbors of the target
+  other.IDs[i, ] <- c(sample(1:ncol(self), K, replace = F)) # generate K random subject IDs
+}
+
+# empty df that will hold demographics data for target subjects, their K neares neigh., and K randon neigh. 
+all_demog <- data.frame(subject_no = numeric(), open = numeric(), 
+                           emo = numeric(), cons = numeric(), 
+                           agree  = numeric(), extra = numeric(), 
+                           art_total = numeric(), age = numeric(),
+                           open_neigh = numeric(), emo_neigh = numeric(), 
+                           cons_neigh = numeric(), agree_neigh = numeric(), 
+                           extra_neigh = numeric(), art_total_neigh = numeric(), 
+                           age_neigh = numeric(), open_other = numeric(), 
+                           emo_other = numeric(), cons_other = numeric(), 
+                           agree_other = numeric(), extra_other = numeric(),
+                           art_total_other = numeric(), age_other = numeric())
+
+for (m in 1:SS) {
+  # extract the demographics data of the target subject (only the continuous variables)
+  main_subject <- self_demog %>% 
+    slice(m)  %>%
+    select(open, emo, cons, agree, extra, art_total, age) %>%
+    colMeans(na.rm = T) %>% data.frame() %>% t() %>% data.frame()
+  
+  # extract the demographics data for the K nearest neighbors of the target subject
+  neigh_means <- matrix(nrow = K, ncol = 1) %>% data.frame()
+  neigh_means <- self_demog %>%
+    slice(neigh.IDs[m, ])  %>%
+    select(open, emo, cons, agree, extra, art_total, age) %>%
+    colMeans(na.rm = T) %>%
+    data.frame() %>% t() %>% data.frame() %>%
+    rename(open_neigh = open, emo_neigh = emo, cons_neigh = cons, agree_neigh = agree,
+           extra_neigh = extra, art_total_neigh = art_total, age_neigh = age) 
+
+  # extract the demographics data for the K random neighbors of the target subject
+  other_means <- matrix(nrow = K, ncol = 1) %>%  data.frame
+  other_means <- self_demog %>%
+    slice(other.IDs[m, ])  %>%
+    select(open, emo, cons, agree, extra, art_total, age) %>%
+    colMeans(na.rm = T) %>%
+    data.frame() %>% t() %>% data.frame() %>% 
+    rename(open_other = open, emo_other = emo, cons_other = cons, agree_other = agree,
+           extra_other = extra, art_total_other = art_total, age_other = age) 
+
+  # combining the demog. data of the target individual, their K neiares neigh., and K random neighbors:
+  one_subject <- cbind(main_subject, neigh_means, other_means) %>%
+    mutate(subject_no = m,
+           open_neigh_dif = abs(open - open_neigh),
+           emo_neigh_dif = abs(emo - emo_neigh),
+           cons_neigh_dif = abs(cons - cons_neigh),
+           agree_neigh_dif = abs(agree - agree_neigh),
+           extra_neigh_dif = abs(extra - extra_neigh),
+           art_neigh_dif = abs(art_total - art_total_neigh),
+           age_neigh_dif = abs(age - age_neigh),
+           open_other_dif = abs(open - open_other),
+           emo_other_dif = abs(emo - emo_other),
+           cons_other_dif = abs(cons - cons_other),
+           agree_other_dif = abs(agree - agree_other),
+           extra_other_dif = abs(extra - extra_other),
+           art_other_dif = abs(art_total - art_total_other),
+           age_other_dif = abs(age - age_other))
+  
+  all_demog <- rbind(all_demog, one_subject)
+}
+```
+
+Below, we compare the  difference between the demographic variables of target subjects' and their K closest neighbors with the  difference between the demographic variables of target subjects' and their K ranrom neighbors. We show them in box plots and conduct a paired sample t-test. None of the test are significant. 
+```{r demographics_plots_analyses}
+# openness
+open <- all_demog %>% select(open_neigh_dif, open_other_dif) %>%
+  pivot_longer(cols="open_neigh_dif":"open_other_dif",
+               names_to = "cohort",values_to = "difference")
+ggplot(open, aes(x=cohort, y=difference)) + geom_boxplot()
+t.test(open$difference ~ open$cohort, paired=T)
+b = open %>% cohens_d(difference ~ cohort, paired=TRUE)
+
+# emotional regulation
+emo <- all_demog %>% select(emo_neigh_dif, emo_other_dif) %>%
+  pivot_longer(cols="emo_neigh_dif":"emo_other_dif",
+               names_to = "cohort",values_to = "difference")
+ggplot(emo, aes(x=cohort, y=difference)) + geom_boxplot()
+t.test(emo$difference ~ emo$cohort, paired=T)
+b = emo %>% cohens_d(difference ~ cohort, paired=TRUE)
+
+# conscientiousness
+cons <- all_demog %>% select(cons_neigh_dif, cons_other_dif) %>%
+  pivot_longer(cols="cons_neigh_dif":"cons_other_dif",
+               names_to = "cohort",values_to = "difference")
+ggplot(cons, aes(x=cohort, y=difference)) + geom_boxplot()
+t.test(cons$difference ~ cons$cohort, paired=T)
+b = cons %>% cohens_d(difference ~ cohort, paired=TRUE)
+
+# agreeableness
+agree <- all_demog %>% select(agree_neigh_dif, agree_other_dif) %>%
+  pivot_longer(cols="agree_neigh_dif":"agree_other_dif",
+               names_to = "cohort",values_to = "difference")
+ggplot(agree, aes(x=cohort, y=difference)) + geom_boxplot()
+t.test(agree$difference ~ agree$cohort, paired=T)
+b = agree %>% cohens_d(difference ~ cohort, paired=TRUE)
+
+# extraversion
+extra <- all_demog %>% select(extra_neigh_dif, extra_other_dif) %>%
+  pivot_longer(cols="extra_neigh_dif":"extra_other_dif",
+               names_to = "cohort",values_to = "difference")
+ggplot(extra, aes(x=cohort, y=difference)) + geom_boxplot()
+t.test(extra$difference ~ extra$cohort, paired=T)
+b = extra %>% cohens_d(difference ~ cohort, paired=TRUE)
+
+# art background
+art <- all_demog %>% select(art_neigh_dif, art_other_dif) %>%
+  pivot_longer(cols="art_neigh_dif":"art_other_dif",
+               names_to = "cohort",values_to = "difference")
+ggplot(art, aes(x=cohort, y=difference)) + geom_boxplot()
+t.test(art$difference ~ art$cohort, paired=T)
+b = art %>% cohens_d(difference ~ cohort, paired=TRUE)
+
+# age
+age <- all_demog %>% select(age_neigh_dif, age_other_dif) %>%
+  pivot_longer(cols="age_neigh_dif":"age_other_dif",
+               names_to = "cohort",values_to = "difference")
+ggplot(age, aes(x=cohort, y=difference)) + geom_boxplot()
+t.test(age$difference ~ age$cohort, paired=T)
+b = age %>% cohens_d(difference ~ cohort, paired=TRUE)
+```
+
+We perform a separate cohort analysis for gender, since it's a binary variable. 
+We calculate each individual's taste cohort using only females vs only male individuals, and see if using the same-sex cohort yields better predictions. 
+
+For males, the RMSE of models using the same-gender cohort is significantly lower than RMSE of models using the opposite gender cohort. For females the pattern is opposite. 
+
+When we include both males and females, the effect disappears. One explanation for these results might be that males have more typical taste, defines as being closer to the populationa average, which would make male participants' ratings a better estimate for both genders on average, To test this, we performed a t-test, comparing the typicality of females and males. Typicality is calculated by first subtracting individuals' ratings of an image from the mean rating of that image, and then averaging across all images for each person. We found that males' ratings were slightly more typical than females, but the effect size is very small. However, females' ratings are more widely distributed, meaning that soome females have more atypical ratings that might drive the results that we observe.  
+```{r demographics_gender}
+set.seed(123)
+N.LAST = 1 # ???
+REPEAT = 10
+
+# empty 3D arrays to hold the R^2 and RMSE values. 
+rmse.F <- array(dim = c(SS, 1, REPEAT)) 
+rmse.M <- array(dim = c(SS, 1, REPEAT)) 
+
+for (r in 1:REPEAT) { # iteration
+  trainIndex <- createDataPartition(1:50, p = SPLIT.RATIOS, list = FALSE) # creates ~40 random integers between 1-5, without replacement
+  
+  data.train.IDs <- self_demog[ ,c(trainIndex,51:ncol(self_demog))] %>% t() 
+  data.test.IDs <- self_demog[ , -trainIndex] %>% t() %>% data.frame()
+  
+  for (k in K:K) { #loop through different number of neighbors 
+    for (i in 1:SS) { #loop through each subject
+      ### MAIN SUBJECT  ### 
+      #extract the train and test data of the subject whose ratings we will predict (i.e., target subject):
+      main.subject.train <- data.frame(data.train.IDs[1:length(trainIndex),i]) 
+      colnames(main.subject.train) = c("DV")
+      
+      main.subject.test <- data.frame(data.test.IDs[1:(50-length(trainIndex)),i])
+      colnames(main.subject.test) = c("DV")
+      
+      self_F_train <- cbind(main.subject.train,
+                            data.train.IDs[,-i] %>% t() %>% data.frame() %>% 
+                            filter(gender == "Female")  %>% 
+                            select(1:length(trainIndex)) %>% t()) %>% 
+                     unlist() %>% as.numeric() %>%  matrix(nrow=length(trainIndex))
+
+      self_F_test  <- cbind(main.subject.test,
+                            data.test.IDs[,-i] %>% t() %>% data.frame() %>% 
+                            filter(gender == "Female")  %>% 
+                            select(1:(50-length(trainIndex))) %>% t()) %>% 
+                    unlist() %>% as.numeric() %>%  matrix(nrow=(50-length(trainIndex)))
+      
+      self_M_train <- cbind(main.subject.train,
+                           data.train.IDs[,-i] %>% t() %>% data.frame() %>% 
+                              filter(gender == "Male")  %>% 
+                              select(1:length(trainIndex)) %>% t()) %>% 
+                    unlist() %>% as.numeric() %>% matrix(nrow=length(trainIndex))
+      
+      self_M_test <- cbind(main.subject.test,
+                          data.test.IDs[,-i] %>% t() %>% data.frame() %>% 
+                            filter(gender == "Male")  %>% 
+                            select(1:(50-length(trainIndex))) %>% t()) %>%
+                    unlist() %>% as.numeric() %>%  matrix(nrow=(50-length(trainIndex)))
+     
+      # Calculate distance matrix
+      distance.matrix.F <- pdist(t(self_F_train)) 
+      colnames(distance.matrix.F) <- rownames(distance.matrix.F) <- colnames(self)
+      
+      distance.matrix.M <- pdist(t(self_M_train)) 
+      colnames(distance.matrix.M) <- rownames(distance.matrix.M) <- colnames(self)
+  
+      a.F = distance.matrix.F[ , 1] %>%  data.frame() 
+      a.M = distance.matrix.M[ , 1] %>%  data.frame() 
+      
+      non.main.subjects.F = a.F[order(a.F$.), , drop=F]
+      non.main.subjects.M = a.M[order(a.M$.), , drop=F] 
+      
+      # Identify the subject ID for k nearest and k random neighbors
+      neighbor.IDs.F <- rownames(non.main.subjects.F)[(2):(k+1)] %>% as.numeric()  
+      neighbor.IDs.M <- rownames(non.main.subjects.M)[(2):(k+1)] %>% as.numeric()  
+      
+      # extract the train data 
+      neighbor.train.F <- self_F_train[, neighbor.IDs.F]
+      neighbor.train.M <- self_M_train[, neighbor.IDs.M]
+      
+      # means of taste and random cohorts that will be used to train the model:
+      neigh.train.mean.F <- rowMeans(neighbor.train.F, na.rm=T)
+      neigh.train.mean.M <- rowMeans(neighbor.train.M, na.rm=T)
+      
+      # train the taste and random cohorts:
+      model.neigh.mean.F <- lm(formula = DV ~ ., data = cbind(main.subject.train, IV = neigh.train.mean.F))
+      model.neigh.mean.M <- lm(formula = DV ~ ., data = cbind(main.subject.train, IV = neigh.train.mean.M))
+
+      ### TEST ###
+      # extract the test data for the taste and random cohort:
+      neighbor.test.F <- self_F_test[, neighbor.IDs.F]
+      neighbor.test.M <- self_M_test[, neighbor.IDs.M]
+      
+      # model predicted values based on the test data:
+       preds.neigh.mean.F <- predict(model.neigh.mean.F, cbind(main.subject.test, IV = rowMeans(neighbor.test.F)))
+       preds.neigh.mean.M <- predict(model.neigh.mean.M, cbind(main.subject.test, IV = rowMeans(neighbor.test.M)))
+      
+      # calculate RMSE values and save them:
+      rmse.F[i, 1, r] <- sqrt(mean((as.numeric(main.subject.test$DV) - as.numeric(preds.neigh.mean))^2))
+      rmse.M[i, 1, r] <- sqrt(mean((as.numeric(main.subject.test$DV) - as.numeric(preds.other.mean))^2))
+    }
+  }
+}
+# take the means 
+# Females
+rmse.meanF <- ((rmse.F[,,1]) %>% as.matrix + (rmse.F[,,2] %>% as.matrix) + 
+                    (rmse.F[,,3] %>% as.matrix) + (rmse.F[,,4] %>% as.matrix) + 
+                    (rmse.F[,,5] %>% as.matrix) + (rmse.F[,,6] %>% as.matrix) +
+                    (rmse.F[,,7] %>% as.matrix) + (rmse.F[,,8] %>% as.matrix) + 
+                    (rmse.F[,,9] %>% as.matrix) + (rmse.F[,,10] %>% as.matrix)) / REPEAT
+
+gender <- self_demog$gender
+rmse.meanF <- data.frame(rmse.meanF) %>% 
+  mutate(gender_other = rep("Female",SS), gender_self = gender) %>% 
+  rename(RMSE=1) %>%
+  mutate(gender_conting = ifelse(gender_self==gender_other, "same","dif") )
+t.test(rmse.meanF$RMSE ~ rmse.meanF$gender_conting)
+
+ggplot(rmse.meanF, aes(x=as.factor(gender_conting), y=RMSE)) +
+  geom_boxplot(aes(x=as.factor(gender_conting), y=RMSE)) +xlab("")
+
+# Males
+rmse.meanM <- ((rmse.M[,,1]) %>% as.matrix + (rmse.M[,,2] %>% as.matrix) + 
+                    (rmse.M[,,3] %>% as.matrix) + (rmse.M[,,4] %>% as.matrix) + 
+                    (rmse.M[,,5] %>% as.matrix) + (rmse.M[,,6] %>% as.matrix) +
+                    (rmse.M[,,7] %>% as.matrix) + (rmse.M[,,8] %>% as.matrix) + 
+                    (rmse.M[,,9] %>% as.matrix) + (rmse.M[,,10] %>% as.matrix)) / REPEAT
+
+rmse.meanM <- data.frame(rmse.meanM) %>% 
+  mutate(gender_other = rep("Male",SS), gender_self = gender) %>% 
+  rename(RMSE=1) %>%
+  mutate(gender_conting = ifelse(gender_self==gender_other, "same","dif"))
+t.test(rmse.meanM$RMSE ~ rmse.meanF$gender_conting)
+
+ggplot(rmse.meanM, aes(x=as.factor(gender_conting), y=RMSE)) +
+  geom_boxplot(aes(x=as.factor(gender_conting), y=RMSE)) +xlab("")
+
+rmse.meanFM <- rbind(rmse.meanF, rmse.meanM)
+ggplot(rmse.meanFM, aes(x=as.factor(gender_conting), y=RMSE)) +
+  geom_boxplot(aes(x=as.factor(gender_conting), y=RMSE)) +xlab("")
+t.test(rmse.meanFM %>% filter(gender_conting=="same") %>% select(RMSE),
+       rmse.meanFM %>% filter(gender_conting=="dif") %>% select(RMSE))
+
+d <- rmse.meanFM %>% cohens_d(RMSE ~ gender_conting)
+d <- combined_models_long %>% 
+  filter(model == c("llvp_mean", "llvp_ind")) %>% 
+  cohens_d(RMSE ~ model, paired=TRUE)
+
+### Do males have more typical taste?
+ave_im_ratings <- rowMeans(self) 
+df_subtracted <- abs(self - ave_im_ratings) %>% t() %>% data.frame() %>% 
+  mutate(gender = self_demog$gender,
+         mean_deviation = rowMeans(df_subtracted[,1:50])) %>% 
+  filter(gender=="Female" | gender=="Male")
+
+t.test(df_subtracted$mean_deviation~df_subtracted$gender)
+b = df_subtracted %>% cohens_d(mean_deviation ~ gender, paired=TRUE)
+ggplot(df_subtracted, aes(x=gender, y=mean_deviation)) + geom_boxplot() + ylab("Mean rating deviation (atypicality)")
+```
+
+```{r llvp_individual_models_NOTUSED}
+set.seed(12345)
+
+R2.ind.model <- data.frame()
+rmse.ind.model <- data.frame()
+
+for (r in 1:10) { 
+  trainIndex <- createDataPartition(1:50, p = SPLIT.RATIOS, list = FALSE)
+
+  llvp.train <- llvps[trainIndex,]
+  llvp.test <- llvps[-trainIndex,]
+  
+  data.train.IDs <- self[trainIndex, ] 
+  data.test.IDs <- self[-trainIndex, ]
+    
+  llvp_self_train <- cbind(llvp.train, data.frame(data.train.IDs))
+  for (s in 10:ncol(llvp_self_train)) { 
+    model_ind <- lm(as.formula(paste(
+        colnames(llvp_self_train)[s], 
+        "~",
+        paste(colnames(llvp_self_train)[c(2:9)], collapse = "+"), 
+        sep = "")), 
+      data=llvp_self_train)
+    
+    model_predictions = predict(model_ind, llvp.test[,2:9]) 
+    RSS = sum((data.test.IDs[,s-9] - model_predictions)^2)
+    TSS = sum((data.test.IDs[,s-9] - mean(data.test.IDs[,s-9]))^2)
+    R2.ind.model[s-9,r] <- 1 - (RSS/TSS)
+    
+    rmse.ind.model[s-9,r] <- sqrt(mean((data.test.IDs[,s-9] - model_predictions)^2))
+  }
+}
+
+hist((R2.ind.model) %>% unlist(), breaks = 100)
+hist((rmse.ind.model) %>% unlist())
+
+# RMSE
+rmse.ind.model[ rmse.ind.model == "-Inf" ] <- 0
+llvp.ind.rmseM <- rowMeans(rmse.ind.model) %>% data.frame()%>%colMeans()%>%print()
+llvp.ind.rmseSD <- rowMeans(rmse.ind.model) %>% sd() %>% print()
+llvp.ind.rmse.it <- rowMeans(rmse.ind.model,na.rm=T) %>% data.frame()
+
+# R2
+R2.ind.model[ R2.ind.model == "-Inf" ] <- 0
+llvp.ind.r2M <- rowMeans(R2.ind.model,na.rm=T) %>% data.frame() %>% colMeans() %>% print()
+llvp.ind.r2SD <- rowMeans(R2.ind.model,na.rm=T) %>% sd() %>% print()
+llvp.ind.r2.it <- rowMeans(R2.ind.model,na.rm=T) %>% data.frame()
+```
+
+```{r llvp_mean_models_NOTUSED}
+set.seed(1234)
+
+R2.mean.model = data.frame()
+rmse.mean.model = data.frame()
+
+for (r in 1:10) { 
+  trainIndex <- createDataPartition(1:50, p = SPLIT.RATIOS, list = FALSE)
+  
+  data.train.IDs <- self[trainIndex, ] 
+  data.test.IDs <- self[-trainIndex, ]
+  llvp.train <- llvps[trainIndex,]
+  llvp.test <- llvps[-trainIndex,]
+  
+  data.train.mean <- rowMeans(data.train.IDs)
+  llvp_self_train <- cbind(llvp.train, data.train.mean)
+
+  model_mean <- lm(data.train.mean ~ hue+sat+bright+sdHue+sdSat+sdBright+ED+entropy, data=llvp_self_train)
+  model_predictions = predict(model_mean, llvp.test[,2:9]) 
+
+  for (s in 1:ncol(self)) { 
+    RSS = sum((data.test.IDs[,s] - model_predictions)^2)
+    TSS = sum((data.test.IDs[,s] - mean(data.test.IDs[,s]))^2)
+    R2.mean.model[s,r] =  1 - (RSS/TSS)
+    rmse.mean.model[s, r] <- sqrt(mean((data.test.IDs[,s] - model_predictions)^2))
+  }
+}
+hist(unlist(R2.mean.model %>% filter(V1 > -2)), breaks = 100)
+hist(unlist(rmse.mean.model))
+
+# RMSE
+rmse.mean.model[rmse.mean.model == "-Inf" ] <- 0
+llvp.mean.rmseM <- rowMeans(rmse.mean.model) %>% data.frame()%>%colMeans()%>%print()
+llvp.mean.rmseSD <- rowMeans(rmse.mean.model) %>% sd() %>% print()
+llvp.mean.rmse.it <- rowMeans(rmse.mean.model,na.rm=T) %>% data.frame() 
+
+# R2
+R2.mean.model[R2.mean.model == "-Inf" ] <- 0
+llvp.mean.r2M <- rowMeans(R2.mean.model,na.rm=T) %>% data.frame() %>% colMeans() %>% print()
+llvp.mean.r2SD <- rowMeans(R2.mean.model,na.rm=T) %>% sd() %>% print()
+llvp.mean.r2.it <- rowMeans(R2.mean.model,na.rm=T) %>% data.frame() 
+```
