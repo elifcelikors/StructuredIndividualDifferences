@@ -1,12 +1,12 @@
-# SharedIndividualDifferences
+# SharedIndividualDifferences (SID)
 
 This project contains the following files:
 
-1) SID_rawData.csv: Includes data from all individuals, including the ones that were excluded from the final analyses and contains untransformed variables. 
+1) SID_rawData.csv: Includes the raw data from all individuals, including the ones that were excluded from the final analyses and contains untransformed variables. 
 
-2) SID_cdataCeaning.Rmd: This is the script that we used to clean the raw data. The output of this script is the data frame that we used in main analyses. 
+2) SID_dataCeaning.Rmd: This is the script that is used to clean the raw data file (SID_rawData). The output of this script (SID_selfRatings.csv) is a data frame that is used in the main analyses. 
 
-3) SID_selfRatings: If you would like to use our data to perform new analyses, we recommend that you use this file. We performed all our analyses on this cleaned data frame. 
+3) SID_selfRatings.csv: This is the cleaned data frame that we used in all our analyses in the published paper. If you would like to use our data to perform new analyses, we recommend that you use this file.
 
 4) SID_mainAnalysis.Rmd: This is the main analysis script.
    
