@@ -1,4 +1,4 @@
-# SharedIndividualDifferences (SID)
+# Structured Individual Differences (SID)
 
 This project contains the following files:
 
