@@ -10,4 +10,9 @@ This project contains the following files:
 
 4) SID_mainAnalysis.Rmd: This is the main analysis script.
    
-5) rmse.neigh.mean.csv, rmse.other.mean.csv, opt_cohort_size.csv, min_point_mean.csv: These four files are outputs of the mainAnalysis script. Running this analysis can take a while, so we are providing the output.
+5) rmse.neigh.mean.csv, rmse.other.mean.csv, opt_cohort_size.csv, min_point_mean.csv: These four files are outputs of the SID_mainAnalysis script. Running SID_mainAnalysis is computationally demanding, therefore can take a while (multiple days on a regular Mac), so we are providing some the output files that can be used in further analyses.
+
+6) SID_visualFeatures.csv: This file has the visual feature analysis of all images in our study. See the following citations for the details of image analyes:
+
+   - Berman, M. G., Jonies, J., & Kaplan, S. (2008). The cognitive benefits of interacting with nautre. Psychological Science, 19(12). 1207-1212.
+   - Celikor, E. & Field, D., (accepted). Beauty is in the Eye of your Cohort: Structured Individual Differences Allows Predictions of Individualized Preference Ratings of Images. Cognition.
