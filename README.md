@@ -1,6 +1,6 @@
 # SharedIndividualDifferences
 
-This project file contains the following elements:
+This project contains the following files:
 
 1) SID_rawData.csv: Includes data from all individuals, including the ones that were excluded from the final analyses and contains untransformed variables. 
 
